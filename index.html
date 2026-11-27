@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CFS Stock Desk</title>
+<meta name="description" content="Reads shipper documents, checks them and keeps the CFS stock report. Works offline; documents never leave this PC.">
+<meta name="theme-color" content="#0c6b75">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<script>
+/* Startup check: if any program file is missing (for example not uploaded to GitHub), say so instead of failing silently. */
+window.__missing = [];
+window.addEventListener('error', function (e) { var t = e.target; if (t && t !== window && (t.src || t.href)) window.__missing.push(String(t.src || t.href).split('/').pop()); }, true);
+window.addEventListener('load', function () { setTimeout(function () {
+  var m = window.__missing.slice();
+  [['XLSX', 'xlsx.full.min.js'], ['ExcelJS', 'exceljs.min.js'], ['pdfjsLib', 'pdf.min.js'], ['Tesseract', 'tesseract.min.js']].forEach(function (g) { if (!window[g[0]] && m.indexOf(g[1]) < 0) m.push(g[1]); });
+  if (!(window.CSD && window.CSD.server) && !m.length) m.push('program files');
+  if (!m.length) return;
+  var d = document.createElement('div'); d.className = 'card banner'; d.id = 'missingFiles';
+  d.style.cssText = 'background:var(--bad-bg);color:var(--bad);border-color:transparent';
+  d.innerHTML = '<span><b>The app cannot work: some files did not load</b> (' + m.join(', ') + ').<br>Upload ALL files from the zip to GitHub again (Add file &rarr; Upload files &rarr; Ctrl+A &rarr; drag in), wait 2 minutes, then close and reopen the app.</span>';
+  (document.querySelector('main') || document.body).prepend(d);
+}, 800); });
+</script>
+<header class="bar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <div><strong>CFS Stock Desk</strong><small id="wh">Hind Terminal CFS</small></div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="read">Read documents</button>
+    <button class="tab" data-tab="stock">Stock <span class="count" id="stockCount"></span></button>
+    <button class="tab" data-tab="plan">Loading &amp; stuffing</button>
+    <button class="tab" data-tab="formats">Shipper formats <span class="count" id="fmtCount"></span></button>
+    <button class="tab" data-tab="combine">Combine reports</button>
+    <button class="tab" data-tab="import">Import / backup</button>
+  </nav>
+  <div class="who">
+    <button class="btn primary small" id="dlExcelTop" type="button" title="Download the stock report as an Excel file (to send to the team)">⬇ Download Excel</button>
+    <span class="pill" id="ocrPill" title="Text recognition for scanned PDFs">OCR</span>
+    <button class="pill" id="filePill" type="button" title="Where your data is saved">Data file</button>
+    <button class="pill on" id="installBtn" type="button" hidden>Install app</button>
+    <label for="cfsSel" class="sr">This PC's CFS</label>
+    <select id="cfsSel" title="The CFS this PC works for (used as Warehouse ID)"><option value="">Choose CFS…</option></select>
+    <label for="userName" class="sr">Your name</label>
+    <input id="userName" placeholder="Your name" autocomplete="off">
+  </div>
+</header>
+
+<main>
+<div id="fileBanner" class="card banner" hidden></div>
+<div id="dueBar" class="duebar" hidden></div>
+<!-- READ -->
+<section id="tab-read" class="view active">
+  <div id="uploadCard" class="card upload">
+    <div class="drop" id="drop">
+      <p class="big">Add all documents of the truck: invoice, every packing list, VDF</p>
+      <div class="slots">
+        <div class="slot" data-slot="inv"><b>📄 Invoice</b><label class="btn small" for="fileInv">+ Add</label><input type="file" id="fileInv" data-slot="inv" multiple accept=".pdf,.xls,.xlsx,.xlsm,.csv,.jpg,.jpeg,.png,.tif,.tiff" hidden><ul class="files"></ul></div>
+        <div class="slot" data-slot="pl"><b>📦 Packing lists</b><label class="btn small" for="filePl">+ Add</label><input type="file" id="filePl" data-slot="pl" multiple accept=".pdf,.xls,.xlsx,.xlsm,.csv,.jpg,.jpeg,.png,.tif,.tiff" hidden><ul class="files"></ul></div>
+        <div class="slot" data-slot="vdf"><b>🚚 VDF</b><label class="btn small" for="fileVdf">+ Add</label><input type="file" id="fileVdf" data-slot="vdf" multiple accept=".pdf,.xls,.xlsx,.xlsm,.csv,.jpg,.jpeg,.png,.tif,.tiff" hidden><ul class="files"></ul></div>
+      </div>
+      <label class="btn primary" for="fileInput">+ Add several files at once</label>
+      <input type="file" id="fileInput" multiple accept=".pdf,.xls,.xlsx,.xlsm,.csv,.jpg,.jpeg,.png,.tif,.tiff" hidden>
+      <p class="muted small">or drag files here – each file goes to its slot by itself (Excel, PDF, scan or photo; shipping bill too)</p>
+    </div>
+    <ul id="fileList" class="files"></ul>
+    <div id="fileCheck" class="filecheck" hidden></div>
+    <div class="row-end">
+      <button class="btn" id="clearFiles" hidden>Clear</button>
+      <button class="btn primary" id="readBtn" disabled>Read documents</button>
+    </div>
+  </div>
+
+  <div id="progress" class="card" hidden>
+    <h3 id="progTitle">Reading documents…</h3>
+    <ol id="progLog" class="log"></ol>
+  </div>
+
+  <div id="review" hidden>
+    <div class="review-head card">
+      <div>
+        <div class="eyebrow" id="srcChip"></div>
+        <h2 id="shipperName"></h2>
+        <p class="muted" id="fileNames"></p>
+      </div>
+      <div class="row-end">
+        <button class="btn" id="askAi" hidden>Ask local AI</button>
+        <button class="btn" id="startOver">Read other documents</button>
+      </div>
+    </div>
+    <div class="split">
+      <div class="left">
+        <div id="needs" class="card needs" hidden>
+          <h3>Needs your input</h3>
+          <p class="muted small">Press <b>Pick</b>, then click the value in the document on the right, or type it in. What you confirm here is remembered for this shipper.</p>
+          <ul id="needList"></ul>
+        </div>
+
+        <div class="card">
+          <h3>Shipment</h3>
+          <div class="legend">
+            <span class="lg st-profile">from saved format</span><span class="lg st-picked">picked / typed</span>
+            <span class="lg st-auto">read automatically – check</span><span class="lg st-fixed">remembered default – check</span><span class="lg st-missing">missing</span><span class="lg st-todo">to be filled by the operator</span>
+          </div>
+          <div id="headerForm" class="form-grid"></div>
+        </div>
+
+        <div class="card">
+          <div id="plBanner" class="plbanner" hidden>
+            <b>No packing list found in these documents.</b> PO, colour, quantity, cartons, weights, delivery no and type are read from the packing list.
+            Upload it together with the invoice (it can be the second page), or:
+            <label class="small"><input type="checkbox" id="plNA"> Packing list not available – take these values from the invoice</label>
+          </div>
+          <div class="row-between"><h3>Items</h3><button class="btn small" id="addRow">Add row</button></div>
+          <div class="table-wrap"><table id="itemTable" class="grid"></table></div>
+          <div id="totals" class="totals"></div>
+        </div>
+
+        <details class="card" id="colsetBox">
+          <summary><h3>Column settings for this shipper <span class="muted small">(set once – read each column from the invoice or the packing list, and which columns this shipper needs)</span></h3></summary>
+          <p class="muted small" id="docTypes"></p>
+          <div class="table-wrap"><table class="grid colset" id="colsetTable"></table></div>
+          <p class="muted small">Saved with the shipper's format when you click <b>Add to stock</b>. Can be changed any time in the <b>Shipper formats</b> tab.</p>
+        </details>
+
+        <details class="card" id="extraBox">
+          <summary><h3>Customs &amp; carting details <span class="muted small">(optional now – can be added later in Stock)</span></h3></summary>
+          <div id="extraForm"></div>
+        </details>
+
+        <div class="card save">
+          <label class="check"><input type="checkbox" id="learnChk" checked> Remember this shipper's format for next time</label>
+          <div id="saveErrors" class="errors" hidden></div>
+          <div class="row-end">
+            <button class="btn" id="forceSave" hidden title="Admin PIN needed">Save anyway (admin)</button>
+            <button class="btn primary" id="saveBtn">Add to stock</button>
+          </div>
+        </div>
+        <div id="saved" class="card ok" hidden></div>
+      </div>
+
+      <div class="right">
+        <div class="viewer card">
+          <div id="pickBanner" class="pick-banner" hidden></div>
+          <div id="pageTabs" class="page-tabs"></div>
+          <div id="pageNote" class="muted small"></div>
+          <div id="pageView" class="page-view"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- STOCK -->
+<section id="tab-stock" class="view">
+  <div class="card" id="slotCard">
+    <div class="row-between"><h3>Daily stock reports</h3><button class="btn small" id="slotLogBtn" type="button">Report log</button></div>
+    <div class="slots" id="slotBtns"></div>
+    <p class="muted small">Each report: the full stock (ALL + one sheet per customer) with an Abstract sheet. After downloading, the abstract and the e-mail subject are shown to copy into the e-mail.</p>
+    <div id="slotLog" hidden></div>
+  </div>
+  <div class="card toolbar">
+    <label class="cfs-only">CFS <select id="cfsFilter"></select></label>
+    <label>Customer <select id="grpFilter"></select></label>
+    <label class="grow">Search <input id="stockSearch" placeholder="Invoice, PO, style, vendor, truck…"></label>
+    <label class="check"><input type="checkbox" id="onlyIssues"> Only rows with problems</label>
+    <button class="btn primary" id="dlReport">Download stock report (.xlsx)</button>
+  </div>
+  <div id="groupCards" class="group-cards"></div>
+  <div class="card">
+    <div class="row-between">
+      <div class="muted small" id="selInfo">Click a row to edit it. Tick rows to update several at once.</div>
+      <div class="row-end">
+        <button class="btn small" id="bulkEdit" disabled>Edit selected</button>
+        <button class="btn small" id="markOut" disabled>Mark as shipped out</button>
+        <button class="btn small danger" id="delSel" disabled title="Admin PIN needed">Delete selected</button>
+        <button class="btn small" id="viewOut" title="Rows stuffed or marked as shipped out">View shipped out</button>
+      </div>
+    </div>
+    <div class="table-wrap tall"><table id="stockTable" class="grid stock"></table></div>
+  </div>
+</section>
+
+<!-- LOADING PLAN & STUFFING -->
+<section id="tab-plan" class="view">
+  <div class="card">
+    <h3>1. Cargo Loading Plan from Customer service</h3>
+    <p class="muted">Upload the plan Excel (like GAP_PLAN). Every planned row is checked against the stock: in stock, cartons = received, not in another plan, not stuffed, OSD / damage.</p>
+    <div class="row-end" style="justify-content:flex-start"><label class="btn primary" for="planFile">Choose plan (.xlsx)…</label><input type="file" id="planFile" accept=".xlsx,.xls" hidden>
+      <span class="muted small" id="planName"></span></div>
+    <div id="planResult"></div>
+  </div>
+  <div class="card">
+    <div class="row-between"><h3>2. Plans ready for stuffing</h3><button class="btn small" id="plansReload" type="button">Refresh</button></div>
+    <div id="plansList" class="muted">No plan linked to the stock yet.</div>
+  </div>
+  <div class="card">
+    <h3>3. Stuffing reports</h3>
+    <div class="row-end" style="justify-content:flex-start">
+      <label>Date <input type="date" id="srDate"></label>
+      <button class="btn primary" id="srDay" type="button">Download stuffing report of the day</button>
+      <span class="muted small" id="srNext"></span>
+    </div>
+    <div id="stuffList"></div>
+  </div>
+</section>
+
+<!-- FORMATS -->
+<section id="tab-formats" class="view">
+  <div class="card">
+    <div class="row-between">
+      <h3>Shipper formats</h3>
+      <div class="row-end">
+        <label class="btn" for="fmtImportFile">Import formats file</label>
+        <input type="file" id="fmtImportFile" accept=".json" hidden>
+        <button class="btn primary" id="fmtExport">Export formats for other PCs</button>
+      </div>
+    </div>
+    <p class="muted">Each shipper's documents are read using what was confirmed the first time. If a shipper changes their layout, the app asks again and updates the format when you save.
+    To share what this PC has learnt, <b>Export</b> and send the file to colleagues; they <b>Import</b> it on their PC.</p>
+    <div id="fmtImportPlan" hidden></div>
+  </div>
+  <div class="card" id="aliasCard">
+    <div class="row-between"><h3>Shipper names <span class="muted small">(one name per shipper – admin)</span></h3>
+      <div class="row-end"><button class="btn small" id="aliasEdit" type="button">Edit list (admin PIN)</button></div></div>
+    <p class="muted small">Different spellings, invoice-number starts and GSTINs of one shipper are saved under one name, so the same invoice is never added twice under two spellings.
+      The list goes with <b>Export formats</b> / <b>Import formats file</b> to the other PCs.</p>
+    <div id="aliasUnmapped"></div>
+    <div id="aliasList"></div>
+  </div>
+  <div id="formatList"></div>
+</section>
+
+<!-- COMBINE -->
+<section id="tab-combine" class="view">
+  <div class="card narrow" id="sfCard">
+    <h3>Combine from shared folder <span class="muted small">(automatic)</span></h3>
+    <p class="muted">Each PC keeps its <b>data file</b> in one shared folder (OneDrive, SharePoint or a network drive) – set it up once on each PC in <b>Import / backup → Create data file</b>. Choose that folder here once; after that one click reads every PC's latest data and makes the combined reports, one per CFS.</p>
+    <div class="row-end" style="justify-content:flex-start">
+      <button class="btn primary" id="sfPick" type="button">Choose shared folder</button>
+      <button class="btn" id="sfAgain" type="button" hidden>Combine again</button>
+      <label class="btn" for="sfFiles">Choose data files instead…</label>
+      <input type="file" id="sfFiles" accept=".json" multiple hidden>
+    </div>
+    <label class="check"><input type="checkbox" id="sfMine"> Also include this PC's stock (if its data file is not in the folder)</label>
+    <div id="sfInfo" class="muted"></div>
+    <div id="sfErr" class="errors" hidden></div>
+    <div class="row-end"><button class="btn primary" id="sfBtn" hidden>Download combined reports</button></div>
+  </div>
+  <div class="card narrow">
+    <h3>Combine stock reports (Excel files)</h3>
+    <p class="muted">Each PC keeps its own stock. Ask colleagues for their latest stock report (Stock tab → Download stock report), then choose those files here. The result is one report with an ALL sheet and one sheet per customer. Rows that appear in more than one report (same invoice + PO + style) are kept once and listed on a "Duplicates removed" sheet.</p>
+    <label class="check"><input type="checkbox" id="cmbMine" checked> Include this PC's stock</label>
+    <p><label class="btn" for="cmbFiles">Choose reports from other PCs (.xlsx)</label>
+    <input type="file" id="cmbFiles" accept=".xlsx" multiple hidden></p>
+    <div id="cmbInfo" class="muted"></div>
+    <div class="row-end"><button class="btn primary" id="cmbBtn" hidden>Download combined report</button></div>
+  </div>
+</section>
+
+<!-- IMPORT -->
+<section id="tab-import" class="view">
+  <div class="card narrow">
+    <h3>Import the current stock report</h3>
+    <p class="muted">Load your existing Excel stock report (the one with the ALL sheet) so the app starts with today's stock. Rows are added as they are; check the Stock tab afterwards.</p>
+    <label class="btn" for="importFile">Choose report (.xlsx)</label>
+    <input type="file" id="importFile" accept=".xlsx" hidden>
+    <p id="importInfo" class="muted"></p>
+    <button class="btn primary" id="importBtn" hidden>Import rows</button>
+  </div>
+  <div class="card narrow" id="dataFileCard">
+    <h3>Data file (recommended)</h3>
+    <p class="muted">The app keeps your stock and shipper formats inside this browser. To be safe if browser data is ever cleared, link a <b>data file</b> (for example in OneDrive or a shared drive): it is updated automatically after every change.</p>
+    <p id="dataFileInfo" class="muted"></p>
+    <div id="dfError" class="errors" hidden></div>
+    <div class="row-end" style="justify-content:flex-start">
+      <button class="btn primary" id="dfNew">Create data file</button>
+      <button class="btn" id="dfOpen">Open existing data file</button>
+      <button class="btn" id="dfSave" hidden>Save now</button>
+      <button class="btn" id="dfForget" hidden>Unlink</button>
+    </div>
+    <p class="muted small" id="dfUnsupported" hidden>This browser cannot link a data file. Use Microsoft Edge or Google Chrome, or use Download backup below regularly.</p>
+  </div>
+  <div class="card narrow" id="listsCard">
+    <h3>Drop-down lists (stuffing)</h3>
+    <p class="muted">Kept by the admin: one entry per line. Operators pick from these lists on the stuffing screen. Saving needs the admin PIN.</p>
+    <div id="listsForm" class="lists-grid"></div>
+    <div class="row-end" style="justify-content:flex-start">
+      <label>Next running no. <input type="number" id="runNo" min="1" style="width:140px"></label>
+      <label class="btn" for="listsFile">Upload lists (.xlsx)…</label><input type="file" id="listsFile" accept=".xlsx,.xls" hidden>
+      <button class="btn primary" id="listsSave" type="button">Save lists</button>
+    </div>
+    <p class="muted small">Excel upload: one column per list, the list name in the first row (e.g. Carrier, Unit, Vessel, Transporter …).</p>
+  </div>
+  <div class="card narrow" id="pinCard">
+    <h3>Admin PIN</h3>
+    <p class="muted">Editing or deleting stock that has been added needs the admin PIN (set separately on each PC). Operators can still read documents, add stock, mark shipped out and download reports.</p>
+    <div class="row-end" style="justify-content:flex-start"><button class="btn" id="pinSet" type="button">Set admin PIN</button></div>
+    <div id="pinInfo" class="small muted"></div>
+  </div>
+  <div class="card narrow" id="chaCard">
+    <h3>Shipper &amp; CHA list</h3>
+    <p class="muted">The CHA Name is filled automatically for each shipper: from this list first, otherwise from the shipper's last shipment. It can always be changed on the reading screen.</p>
+    <div class="row-end" style="justify-content:flex-start">
+      <label class="btn" for="chaFile">Upload list (.xlsx / .csv)…</label><input type="file" id="chaFile" accept=".xlsx,.xls,.csv" hidden>
+      <button class="btn" id="chaExport" type="button">Download current list</button>
+      <button class="btn" id="chaClear" type="button">Remove uploaded list</button>
+    </div>
+    <p class="muted small">The file needs two columns: <b>Shipper</b> and <b>CHA Name</b> (header in the first rows). Tip: download the current list, complete it in Excel, upload it again.</p>
+    <div id="chaInfo" class="small"></div>
+  </div>
+  <div class="card narrow" id="headersCard">
+    <h3>Report headers</h3>
+    <p class="muted">The surveyor lines printed at the top of each site's stock report. Chennai sites (HTPL, SATTVA) use PINNACLE, Tuticorin sites (ST JOHN, SICAL) use EVERBLUE.</p>
+    <div id="headersForm"></div>
+    <div class="row-end"><button class="btn" id="hdrReset" type="button">Reset to default</button><button class="btn primary" id="hdrSave" type="button">Save headers</button></div>
+  </div>
+  <div class="card narrow">
+    <h3>Backup</h3>
+    <p class="muted">Download a copy of everything (stock and shipper formats) as one file. Keep it on a shared drive or pen drive.</p>
+    <div class="row-end" style="justify-content:flex-start">
+      <button class="btn" id="backupBtn">Download backup</button>
+      <label class="btn" for="restoreFile">Restore from backup…</label>
+      <input type="file" id="restoreFile" accept=".json" hidden>
+    </div>
+    <p class="muted small" id="aboutInfo"></p>
+  </div>
+</section>
+</main>
+
+<dialog id="editDlg">
+  <form method="dialog" id="editForm">
+    <div class="dlg-head"><h3 id="editTitle">Edit row</h3><button class="btn small" value="cancel" formnovalidate>Close</button></div>
+    <div id="editBody"></div>
+    <div id="editErrors" class="errors" hidden></div>
+    <div class="row-end dlg-foot">
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" id="editSave" value="default">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="confirmDlg">
+  <form method="dialog">
+    <p id="confirmText"></p>
+    <div class="row-end"><button class="btn" value="no">Cancel</button><button class="btn danger" value="yes">Confirm</button></div>
+  </form>
+</dialog>
+<dialog id="promptDlg">
+  <form method="dialog">
+    <p id="promptText"></p>
+    <input id="promptIn" autocomplete="new-password" style="width:100%;box-sizing:border-box">
+    <input id="promptIn2" type="password" autocomplete="new-password" placeholder="Type it again" style="width:100%;box-sizing:border-box;margin-top:6px" hidden>
+    <p id="promptErr" class="errors small" hidden></p>
+    <div class="row-end"><button class="btn primary" value="yes" id="promptOk" style="order:2">OK</button><button class="btn" value="no" style="order:1">Cancel</button></div>
+  </form>
+</dialog>
+<dialog id="stuffDlg" class="wide">
+  <form method="dialog" id="stuffForm">
+    <div class="dlg-head"><h3 id="stuffTitle">Stuff container</h3><button class="btn small" value="cancel" formnovalidate>Close</button></div>
+    <div id="stuffBody"></div>
+    <div id="stuffErr" class="errors" hidden></div>
+    <div class="row-end dlg-foot"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" id="stuffSave" value="default">Confirm stuffing</button></div>
+  </form>
+</dialog>
+<dialog id="outDlg" class="wide">
+  <form method="dialog">
+    <div class="dlg-head"><h3>Shipped out</h3><button class="btn small" value="close">Close</button></div>
+    <div class="row-end" style="justify-content:flex-start;gap:8px;flex-wrap:wrap">
+      <input type="search" id="outSearch" placeholder="Search container, invoice, PO, style…" style="flex:1;min-width:220px">
+      <span class="muted small" id="outInfo"></span>
+    </div>
+    <div class="table-wrap" style="max-height:60vh;overflow:auto"><table class="grid" id="outTable"></table></div>
+    <p class="muted small">"Return to stock" needs the admin PIN. A stuffed row loses its container details and is taken off that container's stuffing report. A part-loaded row is added back to the cartons still in stock.</p>
+    <div class="row-end"><button class="btn" value="close">Close</button><button class="btn primary" type="button" id="outReturn" disabled>Return to stock</button></div>
+  </form>
+</dialog>
+<dialog id="abstractDlg" class="wide">
+  <form method="dialog">
+    <div class="dlg-head"><h3>Abstract for the e-mail</h3><button class="btn small" value="close">Close</button></div>
+    <p><b>Subject:</b> <span id="abSubject"></span> <button class="btn small" type="button" id="abCopySubject">Copy subject</button></p>
+    <div id="abTable"></div>
+    <div class="row-end"><button class="btn primary" type="button" id="abCopy">Copy abstract</button></div>
+  </form>
+</dialog>
+<dialog id="pinDlg">
+  <form method="dialog" id="pinForm">
+    <p><b>Admin PIN</b></p>
+    <p class="muted small" id="pinWhy">Only the admin can edit or delete stock that has been added.</p>
+    <input type="password" id="pinInput" inputmode="numeric" autocomplete="off" maxlength="12" style="width:160px;font-size:20px;letter-spacing:6px">
+    <p class="err small" id="pinErr"></p>
+    <div class="row-end"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="ok">OK</button></div>
+  </form>
+</dialog>
+<dialog id="alertDlg">
+  <form method="dialog">
+    <p id="alertText" style="font-weight:600"></p>
+    <div class="row-end"><button class="btn primary" value="ok">OK – I will correct it</button></div>
+  </form>
+</dialog>
+<div id="toast" class="toast" hidden></div>
+<script src="xlsx.full.min.js"></script>
+<script src="exceljs.min.js"></script>
+<script src="pdf.min.js"></script>
+<script src="tesseract.min.js"></script>
+<script src="fields.js"></script>
+<script src="normalize.js"></script>
+<script src="profiles.js"></script>
+<script src="auto.js"></script>
+<script src="carrefour.js"></script>
+<script src="ops.js"></script>
+<script src="validate.js"></script>
+<script src="reader.js"></script>
+<script src="store.js"></script>
+<script src="firebase-bundle.min.js"></script>
+<script src="cloud-config.js"></script>
+<script src="cloud-ui.js"></script>
+<script src="cloud.js"></script>
+<script src="report.js"></script>
+<script src="reports15.js"></script>
+<script src="server.js"></script>
+<script src="app.js"></script>
+<script src="wizard.js"></script>
+<script src="ops-ui.js"></script>
+<script src="trucks-ui.js"></script>
+<script src="reports-ui.js"></script>
+<script src="mailer.js"></script>
+<script src="pwa.js"></script>
+</body>
+</html>
